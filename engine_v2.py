@@ -612,22 +612,28 @@ def apply_hard_redirect(query):
     elif re.search(r'\bconstitution\b', query_lower) or re.search(r'\barticle\s+\d+\b', query_lower): act_target = "Constitution"
 
     sec_match = re.search(r'\b(?:section|sec|s\.?)\s*(\d+[a-z]?)\b', query_lower)
+    if not sec_match and act_target:
+        # Fallback: catch "BNS 102" or "102 BNS" where section word is omitted
+        sec_match = re.search(r'\b(\d+[a-z]?)\b', query_lower)
+
     art_match = re.search(r'\b(?:article|art\.?)\s*(\d+)\b', query_lower)
+
 
     if act_target == "Constitution" or art_match:
         num = art_match.group(1) if art_match else (sec_match.group(1) if sec_match else None)
         if num:
             try:
+                active_coll = QDRANT_COLLECTION_BGE if _voyage_rate_limited else QDRANT_COLLECTION
                 hits, _ = qdrant.scroll(
-                    collection_name=QDRANT_COLLECTION,
+                    collection_name=active_coll,
                     scroll_filter=Filter(must=[
-                        FieldCondition(key="act",     match=MatchValue(value="Constitution")),
-                        FieldCondition(key="article", match=MatchValue(value=str(num)))
+                        FieldCondition(key="act", match=MatchValue(value="Constitution"))
                     ]),
-                    limit=1, with_payload=True, with_vectors=False
+                    limit=50, with_payload=True, with_vectors=False
                 )
-                if hits:
-                    exact = dict(hits[0].payload)
+                matching = [h for h in hits if str(h.payload.get("article", "")).strip() == str(num) or str(h.payload.get("chunk_id", "")).endswith(f"_S{num}")]
+                if matching:
+                    exact = dict(matching[0].payload)
                     exact["rrf_score"] = 2.0 / 60.0
                     exact["confidence_score"] = 1.0
                     exact["redirect_reason"] = f"Exact article lookup for Article {num}"
@@ -636,18 +642,30 @@ def apply_hard_redirect(query):
             except Exception as e:
                 print(f"Qdrant article lookup failed: {e}")
 
+
     if act_target and sec_match:
         num = sec_match.group(1)
         norm_act = normalize_act_name(act_target)
         try:
+            active_coll = QDRANT_COLLECTION_BGE if _voyage_rate_limited else QDRANT_COLLECTION
             hits, _ = qdrant.scroll(
-                collection_name=QDRANT_COLLECTION,
+                collection_name=active_coll,
                 scroll_filter=Filter(must=[
                     FieldCondition(key="act",     match=MatchValue(value=norm_act)),
                     FieldCondition(key="section", match=MatchValue(value=str(num)))
                 ]),
                 limit=1, with_payload=True, with_vectors=False
             )
+            if not hits:
+                hits, _ = qdrant.scroll(
+                    collection_name=QDRANT_COLLECTION,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(key="act",     match=MatchValue(value=norm_act)),
+                        FieldCondition(key="section", match=MatchValue(value=str(num)))
+                    ]),
+                    limit=1, with_payload=True, with_vectors=False
+                )
+
             if hits:
                 exact = dict(hits[0].payload)
                 exact["rrf_score"] = 2.0 / 60.0
@@ -713,6 +731,12 @@ def parse_multi_law_query(query: str) -> List[Tuple[str, str]]:
             nums = extract_section_numbers_from_text(sub_segment)
             for num in nums:
                 results.append((act, num))
+        else:
+            # Fallback: catch "BNS 101" where section word is omitted
+            nums = extract_section_numbers_from_text(segment)
+            for num in nums:
+                results.append((act, num))
+
                 
     # Case 2: Act name is mentioned after the section numbers
     # e.g., "Sections 103 and 105 of the BNS"
@@ -729,6 +753,12 @@ def parse_multi_law_query(query: str) -> List[Tuple[str, str]]:
                 nums = extract_section_numbers_from_text(sub_segment)
                 for num in nums:
                     results.append((act, num))
+        else:
+            # Fallback: catch "101 BNS" where section word is omitted
+            nums = extract_section_numbers_from_text(segment_before)
+            for num in nums:
+                results.append((act, num))
+
 
     # Case 3: IPC mappings
     is_ipc = "ipc" in query_lower or "indian penal code" in query_lower
@@ -784,28 +814,59 @@ def extract_all_exact_matches(query: str) -> List[Dict]:
     # 2. Call parse_multi_law_query to find all mentioned (Act, Num) pairs
     parsed_pairs = parse_multi_law_query(query)
     
+    active_coll = QDRANT_COLLECTION_BGE if _voyage_rate_limited else QDRANT_COLLECTION
     for act, num in parsed_pairs:
-        # Determine target act and field name
         norm_act = normalize_act_name(act)
-        key_name = "article" if norm_act == "Constitution" else "section"
         try:
-            hits, _ = qdrant.scroll(
-                collection_name=QDRANT_COLLECTION,
-                scroll_filter=Filter(must=[
-                    FieldCondition(key="act", match=MatchValue(value=norm_act)),
-                    FieldCondition(key=key_name, match=MatchValue(value=str(num)))
-                ]),
-                limit=1, with_payload=True, with_vectors=False
-            )
-            if hits and hits[0].payload is not None:
-                exact = dict(hits[0].payload)
-                exact["rrf_score"] = 2.0 / 60.0
-                exact["confidence_score"] = 1.0
-                exact["redirect_reason"] = f"Exact {key_name} lookup for {norm_act} {key_name.capitalize()} {num}"
-                normalize_returned_act_name(exact)
-                matches.append(exact)
+            if norm_act == "Constitution":
+                hits, _ = qdrant.scroll(
+                    collection_name=active_coll,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(key="act", match=MatchValue(value="Constitution"))
+                    ]),
+                    limit=50, with_payload=True, with_vectors=False
+                )
+                matching = [h for h in hits if str(h.payload.get("article", "")).strip() == str(num) or str(h.payload.get("chunk_id", "")).endswith(f"_S{num}")]
+                if matching and matching[0].payload:
+                    exact = dict(matching[0].payload)
+                    exact["rrf_score"] = 999.0
+                    exact["confidence_score"] = 1.0
+                    exact["is_exact_match"] = True
+                    exact["_force_injected"] = True
+                    exact["redirect_reason"] = f"Exact article lookup for Constitution Article {num}"
+                    normalize_returned_act_name(exact)
+                    matches.append(exact)
+            else:
+                hits, _ = qdrant.scroll(
+                    collection_name=active_coll,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(key="act", match=MatchValue(value=norm_act)),
+                        FieldCondition(key="section", match=MatchValue(value=str(num)))
+                    ]),
+                    limit=1, with_payload=True, with_vectors=False
+                )
+                if not hits:
+                    # Cross-collection fallback
+                    hits, _ = qdrant.scroll(
+                        collection_name=QDRANT_COLLECTION,
+                        scroll_filter=Filter(must=[
+                            FieldCondition(key="act", match=MatchValue(value=norm_act)),
+                            FieldCondition(key="section", match=MatchValue(value=str(num)))
+                        ]),
+                        limit=1, with_payload=True, with_vectors=False
+                    )
+                if hits and hits[0].payload is not None:
+                    exact = dict(hits[0].payload)
+                    exact["rrf_score"] = 999.0
+                    exact["confidence_score"] = 1.0
+                    exact["is_exact_match"] = True
+                    exact["_force_injected"] = True
+                    exact["redirect_reason"] = f"Exact section lookup for {norm_act} Section {num}"
+                    normalize_returned_act_name(exact)
+                    matches.append(exact)
         except Exception as e:
             print(f"Scroll lookup failed for {norm_act} {num}: {e}")
+
 
     # Deduplicate matches by (act, section/article)
     unique_matches = []
@@ -1231,6 +1292,27 @@ def hybrid_retrieve(query: str, k: int = 15, act_filter: Optional[List[str]] = N
         print(f"Qdrant hybrid search failed: {e}. Returning empty.")
         retrieved = []
 
+    # ── Hard Redirect / Exact Section Lookup Guard ────────────────────────────
+    # If the user typed an explicit citation like "section 102 BNS" or "BNS 102",
+    # fetch the exact section from Qdrant and inject it at Rank 1.
+    try:
+        redirect_res = apply_hard_redirect(query)
+        if redirect_res.get("redirect") and redirect_res.get("match"):
+            exact_match = redirect_res["match"]
+            max_r = max((r["rrf_score"] for r in retrieved), default=1.0)
+            exact_match["rrf_score"] = max_r * 1.10
+            exact_match["confidence_score"] = 1.0
+            exact_match["_force_injected"] = True
+            exact_match["is_exact_match"] = True
+            exact_match["rerank_score"] = 999.0
+            # Prepend exact match to retrieved candidates
+            retrieved.insert(0, exact_match)
+            print(f"🎯 Exact section hard-redirect applied: {exact_match.get('act')} §{exact_match.get('section')}")
+
+    except Exception as _e_hdr:
+        print(f"Hard redirect check failed: {_e_hdr}")
+
+
     # ── Similarity Floor — drop chunks with negligible RRF scores ────────────
     # Chunks scoring below 15% of the top result are garbage from the tail of
     # the search and will only cause LLM hallucination if passed forward.
@@ -1547,14 +1629,18 @@ def rerank_candidates(query: str, candidates: List[Dict]) -> List[Dict]:
                 scores_raw = r.json()
                 if isinstance(scores_raw, list) and len(scores_raw) == len(candidates):
                     for i, c in enumerate(candidates):
-                        score_item = scores_raw[i]
-                        if isinstance(score_item, dict):
-                            c["rerank_score"] = score_item.get("score", 0.0)
-                        elif isinstance(score_item, list) and score_item:
-                            best = max(score_item, key=lambda x: x.get("score", 0.0))
-                            c["rerank_score"] = best.get("score", 0.0)
+                        if c.get("is_exact_match") or c.get("_force_injected"):
+                            c["rerank_score"] = 999.0
                         else:
-                            c["rerank_score"] = float(score_item) if isinstance(score_item, (int, float)) else 0.0
+                            score_item = scores_raw[i]
+                            if isinstance(score_item, dict):
+                                c["rerank_score"] = score_item.get("score", 0.0)
+                            elif isinstance(score_item, list) and score_item:
+                                best = max(score_item, key=lambda x: x.get("score", 0.0))
+                                c["rerank_score"] = best.get("score", 0.0)
+                            else:
+                                c["rerank_score"] = float(score_item) if isinstance(score_item, (int, float)) else 0.0
+
                     # Default safety for unmatched indices
                     for c in candidates:
                         if "rerank_score" not in c:
@@ -1570,7 +1656,11 @@ def rerank_candidates(query: str, candidates: List[Dict]) -> List[Dict]:
             results = _local_reranker(pairs, truncation=True, max_length=512)
             scores = [r["score"] if isinstance(r, dict) else float(r) for r in results]
             for i, c in enumerate(candidates):
-                c["rerank_score"] = scores[i]
+                if c.get("is_exact_match") or c.get("_force_injected"):
+                    c["rerank_score"] = 999.0
+                else:
+                    c["rerank_score"] = scores[i]
+
             reranked = True
             print(f"✓ Local CPU cross-encoder reranker succeeded for {len(candidates)} candidates.")
         except Exception as e:
@@ -1629,12 +1719,16 @@ def rerank_candidates(query: str, candidates: List[Dict]) -> List[Dict]:
 
     # Normalize confidence score based on the absolute rerank relevance score
     for c in candidates:
-        if "rerank_score" in c:
+        if c.get("is_exact_match") or c.get("_force_injected"):
+            c["rerank_score"] = 999.0
+            c["confidence_score"] = 1.0
+        elif "rerank_score" in c:
             # Map score to [0.0, 1.0] interval
             # Sigmoid maps BGE logits (-inf,+inf) -> (0,1); clamp discards valid negative logits
             c["confidence_score"] = 1.0 / (1.0 + math.exp(-c["rerank_score"]))
 
     return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+
 
 # ==========================================
 # Response Caching
@@ -1980,12 +2074,19 @@ def _validate_citations_strict(response_data: dict, chunks: List[Dict]) -> bool:
 # ==========================================
 def analyze(query: str, is_lawyer_mode: bool = False, user_id: Optional[str] = None) -> dict:
     """Core entry point for the RAG pipeline."""
-    # 1. Cache Check
-    if os.getenv("DISABLE_CACHE") != "true":
+    # 1. Cache Check (bypass cache for exact section citations so they always run fresh & update)
+    is_exact_sec = False
+    try:
+        is_exact_sec = apply_hard_redirect(query).get("redirect", False)
+    except Exception:
+        pass
+
+    if os.getenv("DISABLE_CACHE") != "true" and not is_exact_sec:
         cached = get_cached_response(query, is_lawyer_mode)
         if cached:
             print("✓ Returning cached query response.")
             return cached
+
 
     # 2. Domain Detection
     best_domain = detect_query_domain(query)
