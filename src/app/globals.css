@@ -1,0 +1,79 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&display=swap');
+
+@import "tailwindcss";
+
+
+:root {
+  --background: #000000;
+  --foreground: #f3f4f6;
+  --card-bg: #111111;
+  --wine: #b8233c;
+  --wine-dark: #6b1d2f;
+  --wine-glow: rgba(184, 35, 60, 0.4);
+}
+
+@theme {
+  --color-wine: #b8233c;
+  --color-wine-dark: #6b1d2f;
+  --color-wine-glow: rgba(184, 35, 60, 0.4);
+  --color-card-bg: #111111;
+  --color-input-bg: #070707;
+  
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+/* Custom glow borders */
+.glow-border-wine {
+  position: relative;
+  border: 1px solid rgba(107, 29, 47, 0.5);
+  box-shadow: 0 0 15px rgba(107, 29, 47, 0.2);
+  transition: all 0.3s ease;
+}
+
+.glow-border-wine:focus-within,
+.glow-border-wine:hover {
+  border-color: rgba(107, 29, 47, 0.9);
+  box-shadow: 0 0 25px rgba(107, 29, 47, 0.5);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #000000;
+}
+::-webkit-scrollbar-thumb {
+  background: #222222;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wine);
+}
+
+/* Custom modal animations - isolated for easy removal */
+@keyframes feedbackModalScaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-modal-scale-in {
+  animation: feedbackModalScaleIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
